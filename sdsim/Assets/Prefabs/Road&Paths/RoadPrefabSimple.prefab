@@ -13,7 +13,7 @@ GameObject:
   - component: {fileID: 64425353663924102}
   - component: {fileID: 23015193109412388}
   m_Layer: 0
-  m_Name: RoadPrefab
+  m_Name: RoadPrefabSimple
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -74,7 +74,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 115a739a667a54683840d902467943e8, type: 2}
+  - {fileID: 2100000, guid: 5566b7414546163459a07dabe141323b, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0

@@ -48,6 +48,7 @@ public class RoadBuilder : MonoBehaviour, IWaitCarPath
     {
         if (doBuildRoad)
         {
+            DestroyRoad();
             InitRoad(pathManager.carPath);
         }
     }

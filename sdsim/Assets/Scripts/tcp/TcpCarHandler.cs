@@ -19,6 +19,7 @@ namespace tk
         public CarSpawner carSpawner;
         public PathManager pm;
         public CarConfig conf;
+        private Car carComp;
 
         // Sensors
         public CameraSensor camSensor;
@@ -45,7 +46,6 @@ namespace tk
 
         bool asynchronous = true;
         float time_step = 0.1f;
-        bool bResetCar = false;
         bool bExitScene = false;
 
         public enum State
@@ -59,6 +59,7 @@ namespace tk
         void Awake()
         {
             car = carObj.GetComponent<ICar>();
+            carComp = carObj.GetComponent<Car>();
             conf = carObj.GetComponent<CarConfig>();
             pm = GameObject.FindObjectOfType<PathManager>();
             carSpawner = GameObject.FindObjectOfType<CarSpawner>();
@@ -238,19 +239,38 @@ namespace tk
         {
             try
             {
-                ai_steering = float.Parse(json["steering"].str, CultureInfo.InvariantCulture.NumberFormat);
-                ai_throttle = float.Parse(json["throttle"].str, CultureInfo.InvariantCulture.NumberFormat);
-                ai_brake = float.Parse(json["brake"].str, CultureInfo.InvariantCulture.NumberFormat);
+                // Check if we have left/right commands (differential drive)
+                if (json.HasField("left") && json.HasField("right"))
+                {
+                    float left = float.Parse(json["left"].str, CultureInfo.InvariantCulture.NumberFormat);
+                    float right = float.Parse(json["right"].str, CultureInfo.InvariantCulture.NumberFormat);
+                    left = Mathf.Clamp(left, -1f, 1f);
+                    right = Mathf.Clamp(right, -1f, 1f);
 
-                ai_steering = clamp(ai_steering, -1.0f, 1.0f);
-                ai_throttle = clamp(ai_throttle, -1.0f, 1.0f);
-                ai_brake = clamp(ai_brake, 0.0f, 1.0f);
+                    if (carComp != null && carComp.useDifferentialDrive)
+                    {
+                        carComp.SetMotorSpeeds(left, right);
+                    }
+                    else
+                    {
+                        Debug.LogWarning("Received left/right but car is not in differential drive mode.");
+                    }
+                }
+                else // fallback to old steering/throttle
+                {
+                    float steering = float.Parse(json["steering"].str, CultureInfo.InvariantCulture.NumberFormat);
+                    float throttle = float.Parse(json["throttle"].str, CultureInfo.InvariantCulture.NumberFormat);
+                    float brake = json.HasField("brake") ? float.Parse(json["brake"].str, CultureInfo.InvariantCulture.NumberFormat) : 0f;
 
-                ai_steering *= steer_to_angle;
+                    steering = Mathf.Clamp(steering, -1f, 1f);
+                    throttle = Mathf.Clamp(throttle, -1f, 1f);
+                    brake = Mathf.Clamp(brake, 0f, 1f);
 
-                car.RequestSteering(ai_steering);
-                car.RequestThrottle(ai_throttle);
-                car.RequestFootBrake(ai_brake);
+                    float steerDeg = steering * steer_to_angle;
+                    car.RequestSteering(steerDeg);
+                    car.RequestThrottle(throttle);
+                    car.RequestFootBrake(brake);
+                }
             }
             catch (Exception e)
             {
@@ -268,9 +288,66 @@ namespace tk
             SceneManager.LoadSceneAsync(0);
         }
 
+        // New reset handler: enqueue the ResetAndRegen coroutine
         void OnResetCarRecv(JSONObject json)
         {
-            bResetCar = true;
+            UnityMainThreadDispatcher.Instance().Enqueue(ResetAndRegen());
+        }
+
+        // Coroutine to regenerate track and reset car position
+        public IEnumerator ResetAndRegen()
+        {
+            // Regenerate track if PathManager exists
+            if (pm != null)
+            {
+                pm.InitCarPath();  // this generates new path and triggers road rebuild
+
+                // Wait one frame for the path to be fully built and RoadBuilder to run
+                yield return null;
+
+                // Get the new start position from the first node
+                if (pm.carPath != null && pm.carPath.nodes.Count > 1)
+                {
+                    Vector3 newPos = pm.carPath.nodes[0].pos;
+                    // Compute direction from first to second node for correct orientation
+                    Vector3 dir = (pm.carPath.nodes[1].pos - newPos).normalized;
+                    Quaternion newRot = Quaternion.LookRotation(dir, Vector3.up);
+
+                    // Move the car to the new start
+                    carObj.transform.SetPositionAndRotation(newPos, newRot);
+
+                    // Reset physics
+                    Rigidbody rb = carObj.GetComponent<Rigidbody>();
+                    if (rb != null)
+                    {
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                    }
+
+                    // Reset controls
+                    car.RequestSteering(0f);
+                    car.RequestThrottle(0f);
+                    car.RequestFootBrake(10f);
+
+                    // Reset path progress index
+                    iActiveSpan = 0;
+                }
+                else
+                {
+                    Debug.LogWarning("Path nodes not available for reset; using fallback.");
+                    car.RestorePosRot();
+                }
+            }
+            else
+            {
+                // Fallback to old reset (just in case)
+                car.RestorePosRot();
+                car.RequestSteering(0f);
+                car.RequestThrottle(0f);
+                car.RequestFootBrake(10f);
+                if (pm) iActiveSpan = 0;
+            }
+            yield return null;
         }
 
         void OnRegenRoad(JSONObject json)
@@ -547,24 +624,7 @@ namespace tk
 
             if (state == State.SendTelemetry)
             {
-                if (bResetCar)
-                {
-                    car.RestorePosRot();
-
-                    if (carObj != null)
-                    {
-                        //reset last controls
-                        car.RequestSteering(0.0f);
-                        car.RequestThrottle(0.0f);
-                        car.RequestFootBrake(10.0f);
-
-                        // Reset closest point of car path
-                        if (pm)
-                            iActiveSpan = 0;
-                    }
-
-                    bResetCar = false;
-                }
+                // Old reset block removed – reset is now handled via ResetAndRegen coroutine.
 
                 timeSinceLastCapture += Time.fixedDeltaTime;
                 if (timeSinceLastCapture >= 1.0f / limitFPS)

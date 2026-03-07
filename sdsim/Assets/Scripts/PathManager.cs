@@ -10,6 +10,7 @@ public class PathManager : MonoBehaviour
 {
     public CarPath carPath;
     public PathCreator pathCreator;
+    private GameObject currentEndTrigger;
 
     [Header("Path type")]
     public bool doMakeRandomPath = true;
@@ -33,6 +34,10 @@ public class PathManager : MonoBehaviour
     public bool sameRandomPath = true;
     public int randSeed = 2;
 
+    [Header("End Detection")]
+    public GameObject endTriggerPrefab;   // assign a simple cube with a trigger collider
+    public float endTriggerRadius = 5f;   // size of the trigger (if using sphere)
+
     [Header("Debug")]
     public bool doShowNodePath = false;
     public bool doShowCenterNodePath = false;
@@ -55,6 +60,13 @@ public class PathManager : MonoBehaviour
 
     public void InitCarPath()
     {
+        // Clean up old debug nodes from previous generation
+        GameObject[] oldNodes = GameObject.FindGameObjectsWithTag("pathNode");
+        foreach (GameObject node in oldNodes)
+        {
+            Destroy(node);
+        }
+
         if (doMakeRandomPath)
         {
             MakeRandomPath();
@@ -400,59 +412,215 @@ public class PathManager : MonoBehaviour
         }
     }
 
+    // Returns true if the two line segments (a1-a2 and b1-b2) intersect in 2D (XZ plane).
+    // If includeEndpoints is false, intersections exactly at endpoints are ignored.
+    private bool SegmentsIntersect(Vector3 a1, Vector3 a2, Vector3 b1, Vector3 b2, bool includeEndpoints = false)
+    {
+        float x1 = a1.x, z1 = a1.z;
+        float x2 = a2.x, z2 = a2.z;
+        float x3 = b1.x, z3 = b1.z;
+        float x4 = b2.x, z4 = b2.z;
+
+        float denom = (x1 - x2) * (z3 - z4) - (z1 - z2) * (x3 - x4);
+        if (Mathf.Abs(denom) < 1e-6f) return false; // parallel
+
+        float t = ((x1 - x3) * (z3 - z4) - (z1 - z3) * (x3 - x4)) / denom;
+        float u = ((x1 - x3) * (z1 - z2) - (z1 - z3) * (x1 - x2)) / denom;
+
+        if (includeEndpoints)
+            return (t >= 0 && t <= 1 && u >= 0 && u <= 1);
+        else
+            return (t > 0 && t < 1 && u > 0 && u < 1);
+    }
+
+    private bool IsPathSelfIntersecting(List<Vector3> points)
+    {
+        int count = points.Count;
+        for (int i = 0; i < count - 1; i++)
+        {
+            for (int j = i + 2; j < count - 1; j++) // j > i+1 to skip adjacent segments
+            {
+                if (SegmentsIntersect(points[i], points[i + 1], points[j], points[j + 1], false))
+                    return true;
+            }
+        }
+        return false;
+    }
+
     void MakeRandomPath()
     {
-        carPath = new CarPath();
+        const int maxAttempts = 1000;
+        int attempts = 0;
+        bool validPathFound = false;
+        List<Vector3> finalPoints = null;
 
-        Vector3 s = startPos.position;
-        float turn = 0f;
-        s.y = 0.5f;
+        Vector3 start = startPos.position;
+        start.y = 0.5f; // fixed height
 
-        span.x = 0f;
-        span.y = 0f;
-        span.z = spanDist;
-
-        List<Vector3> points = new List<Vector3>();
-
-        for (int iS = 0; iS < numSpans; iS++)
+        while (!validPathFound && attempts < maxAttempts)
         {
-            Vector3 np = s;
-            points.Add(np);
+            attempts++;
 
-            float t = UnityEngine.Random.Range(-1.0f * turnInc, turnInc);
+            // ----- Generate random walk (original logic) -----
+            Vector3 s = start;
+            float turn = 0f;
+            span.x = 0f;
+            span.y = 0f;
+            span.z = spanDist;
 
-            turn += t;
+            List<Vector3> points = new List<Vector3>();
+            points.Add(s);
 
-            Quaternion rot = Quaternion.Euler(0.0f, turn, 0f);
-            span = rot * span.normalized;
-
-            if (SegmentCrossesPath(np + (span.normalized * 100.0f), 90.0f, points.ToArray()))
+            for (int iS = 0; iS < numSpans; iS++)
             {
-                //turn in the opposite direction if we think we are going to run over the path
-                turn *= -0.5f;
-                rot = Quaternion.Euler(0.0f, turn, 0f);
+                float t = Random.Range(-turnInc, turnInc);
+                turn += t;
+
+                Quaternion rot = Quaternion.Euler(0f, turn, 0f);
                 span = rot * span.normalized;
+
+                // Quick local avoidance (original heuristic)
+                if (SegmentCrossesPath(s + (span.normalized * 100f), 90f, points.ToArray()))
+                {
+                    turn *= -0.5f;
+                    rot = Quaternion.Euler(0f, turn, 0f);
+                    span = rot * span.normalized;
+                }
+
+                span *= spanDist;
+                s = s + span;
+                points.Add(s);
             }
 
-            span *= spanDist;
+            // ----- Accurate self‑intersection check -----
+            if (IsPathSelfIntersecting(points))
+            {
+                // Path crosses itself – reject and retry
+                continue;
+            }
 
-            s = s + span;
+            // If we get here, the path is valid
+            finalPoints = points;
+            validPathFound = true;
         }
 
-        for (int i = 0; i < points.Count; i++)
+        if (!validPathFound)
         {
-            Vector3 point = points[(int)nfmod(i, (points.Count))];
-            Vector3 previous_point = points[(int)nfmod(i - 1, (points.Count))];
-            Vector3 next_point = points[(int)nfmod(i + 1, (points.Count))];
+            Debug.LogError("Could not generate a non‑intersecting path after " + maxAttempts + " attempts. Using last attempt (may be invalid).");
+            // Fallback: generate a simple circle
+            finalPoints = new List<Vector3>();
+            int numCirclePoints = 20;
+            for (int i = 0; i <= numCirclePoints; i++)
+            {
+                float angle = i * Mathf.PI * 2f / numCirclePoints;
+                finalPoints.Add(new Vector3(Mathf.Sin(angle) * 20f, 0.5f, Mathf.Cos(angle) * 20f));
+            }
+        }
+
+        // ----- Build CarPath nodes (unchanged) -----
+        carPath = new CarPath();
+        for (int i = 0; i < finalPoints.Count; i++)
+        {
+            Vector3 point = finalPoints[i];
+            Vector3 prev = finalPoints[(i - 1 + finalPoints.Count) % finalPoints.Count];
+            Vector3 next = finalPoints[(i + 1) % finalPoints.Count];
 
             PathNode p = new PathNode();
             p.pos = point;
-            p.rotation = Quaternion.LookRotation(next_point - previous_point, Vector3.up); ;
+            p.rotation = Quaternion.LookRotation(next - prev, Vector3.up);
             carPath.nodes.Add(p);
             carPath.centerNodes.Add(p);
         }
 
+        // ---------- NEW: Spawn end trigger at the last node ----------
+        // Destroy previous trigger if it exists
+        if (currentEndTrigger != null)
+            Destroy(currentEndTrigger);
+
+        if (carPath.nodes.Count > 0)
+        {
+            Vector3 lastPos = carPath.nodes[carPath.nodes.Count - 1].pos;
+
+            if (endTriggerPrefab != null)
+            {
+                currentEndTrigger = Instantiate(endTriggerPrefab, lastPos, Quaternion.identity, transform);
+            }
+            else
+            {
+                // Fallback: create a sphere trigger
+                GameObject triggerObj = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                triggerObj.transform.position = lastPos;
+                triggerObj.transform.localScale = Vector3.one * endTriggerRadius;
+                // Remove the visual mesh
+                Destroy(triggerObj.GetComponent<MeshRenderer>());
+                // Ensure it's a trigger
+                Collider col = triggerObj.GetComponent<Collider>();
+                col.isTrigger = true;
+                triggerObj.transform.parent = transform;
+                currentEndTrigger = triggerObj;
+            }
+
+            // Add the EndTrigger script and set the pathManager reference
+            EndTrigger triggerScript = currentEndTrigger.AddComponent<EndTrigger>();
+            triggerScript.pathManager = this;
+        }
+        // -------------------------------------------------------------
     }
+
+
+    //void MakeRandomPath()
+    //{
+    //    carPath = new CarPath();
+
+    //    Vector3 s = startPos.position;
+    //    float turn = 0f;
+    //    s.y = 0.5f;
+
+    //    span.x = 0f;
+    //    span.y = 0f;
+    //    span.z = spanDist;
+
+    //    List<Vector3> points = new List<Vector3>();
+
+    //    for (int iS = 0; iS < numSpans; iS++)
+    //    {
+    //        Vector3 np = s;
+    //        points.Add(np);
+
+    //        float t = UnityEngine.Random.Range(-1.0f * turnInc, turnInc);
+
+    //        turn += t;
+
+    //        Quaternion rot = Quaternion.Euler(0.0f, turn, 0f);
+    //        span = rot * span.normalized;
+
+    //        if (SegmentCrossesPath(np + (span.normalized * 100.0f), 90.0f, points.ToArray()))
+    //        {
+    //            //turn in the opposite direction if we think we are going to run over the path
+    //            turn *= -0.5f;
+    //            rot = Quaternion.Euler(0.0f, turn, 0f);
+    //            span = rot * span.normalized;
+    //        }
+
+    //        span *= spanDist;
+
+    //        s = s + span;
+    //    }
+
+    //    for (int i = 0; i < points.Count; i++)
+    //    {
+    //        Vector3 point = points[(int)nfmod(i, (points.Count))];
+    //        Vector3 previous_point = points[(int)nfmod(i - 1, (points.Count))];
+    //        Vector3 next_point = points[(int)nfmod(i + 1, (points.Count))];
+
+    //        PathNode p = new PathNode();
+    //        p.pos = point;
+    //        p.rotation = Quaternion.LookRotation(next_point - previous_point, Vector3.up); ;
+    //        carPath.nodes.Add(p);
+    //        carPath.centerNodes.Add(p);
+    //    }
+
+    //}
 
     public bool SegmentCrossesPath(Vector3 posA, float rad, Vector3[] posN)
     {
