@@ -363,6 +363,7 @@ public class CarSpawner : MonoBehaviour
             // Compute direction from first node to second node
             Vector3 dir = (pathManager.carPath.nodes[1].pos - pos).normalized;
             Quaternion rot = Quaternion.LookRotation(dir, Vector3.up);
+            Debug.Log($"[GetCarStartPosRot] Using path nodes: pos={pos}, rot={rot.eulerAngles}");
             // Apply any necessary rotation offset (e.g., if car faces different axis)
             // rot = rot * Quaternion.Euler(carRotationOffset); // if you have an offset field
             return (pos, rot);
@@ -373,12 +374,16 @@ public class CarSpawner : MonoBehaviour
             Vector3 startPos = startsTm[0].position;
             Quaternion startRot = startsTm[0].rotation;
 
+            Debug.Log($"[GetCarStartPosRot] Using startsTm: pos={startPos}, rot={startRot.eulerAngles}");
+
+
             if (IsOccupied(startPos))
             {
                 int iCar = 0;
                 while (IsOccupied(startPos))
                 {
                     (startPos, startRot) = GetStartPosRot(iCar);
+                    Debug.Log($"[GetCarStartPosRot] Checking occupied: iCar={iCar}, pos={startPos}, rot={startRot.eulerAngles}");
                     iCar++;
                 }
             }

@@ -19,7 +19,7 @@ namespace tk
         public CarSpawner carSpawner;
         public PathManager pm;
         public CarConfig conf;
-        private Car carComp;
+        private Car carComp; // <-- added for differential drive
 
         // Sensors
         public CameraSensor camSensor;
@@ -46,7 +46,11 @@ namespace tk
 
         bool asynchronous = true;
         float time_step = 0.1f;
+        bool bResetCar = false;
         bool bExitScene = false;
+
+        // Flag set by EndTrigger to indicate next reset should regenerate track
+        public bool regenerateOnNextReset = false;
 
         public enum State
         {
@@ -59,7 +63,7 @@ namespace tk
         void Awake()
         {
             car = carObj.GetComponent<ICar>();
-            carComp = carObj.GetComponent<Car>();
+            carComp = carObj.GetComponent<Car>(); // <-- cache the Car component
             conf = carObj.GetComponent<CarConfig>();
             pm = GameObject.FindObjectOfType<PathManager>();
             carSpawner = GameObject.FindObjectOfType<CarSpawner>();
@@ -235,10 +239,14 @@ namespace tk
             return ret;
         }
 
+        // UPDATED: Handle both steering/throttle and left/right commands
         void OnControlsRecv(JSONObject json)
         {
             try
             {
+                // Log the raw message for debugging (optional)
+                Debug.Log($"OnControlsRecv: {json}");
+
                 // Check if we have left/right commands (differential drive)
                 if (json.HasField("left") && json.HasField("right"))
                 {
@@ -256,8 +264,9 @@ namespace tk
                         Debug.LogWarning("Received left/right but car is not in differential drive mode.");
                     }
                 }
-                else // fallback to old steering/throttle
+                else if (json.HasField("steering") && json.HasField("throttle"))
                 {
+                    // Standard steering/throttle control
                     float steering = float.Parse(json["steering"].str, CultureInfo.InvariantCulture.NumberFormat);
                     float throttle = float.Parse(json["throttle"].str, CultureInfo.InvariantCulture.NumberFormat);
                     float brake = json.HasField("brake") ? float.Parse(json["brake"].str, CultureInfo.InvariantCulture.NumberFormat) : 0f;
@@ -271,10 +280,14 @@ namespace tk
                     car.RequestThrottle(throttle);
                     car.RequestFootBrake(brake);
                 }
+                else
+                {
+                    Debug.LogWarning("OnControlsRecv: JSON missing expected fields. Ignoring.");
+                }
             }
             catch (Exception e)
             {
-                Debug.Log(e.ToString());
+                Debug.LogError($"OnControlsRecv exception: {e}");
             }
         }
 
@@ -288,65 +301,61 @@ namespace tk
             SceneManager.LoadSceneAsync(0);
         }
 
-        // New reset handler: enqueue the ResetAndRegen coroutine
+        // UPDATED: Check flag to decide between regeneration and simple reset
         void OnResetCarRecv(JSONObject json)
         {
-            UnityMainThreadDispatcher.Instance().Enqueue(ResetAndRegen());
-        }
-
-        // Coroutine to regenerate track and reset car position
-        public IEnumerator ResetAndRegen()
-        {
-            // Regenerate track if PathManager exists
-            if (pm != null)
+            if (regenerateOnNextReset)
             {
-                pm.InitCarPath();  // this generates new path and triggers road rebuild
-
-                // Wait one frame for the path to be fully built and RoadBuilder to run
-                yield return null;
-
-                // Get the new start position from the first node
-                if (pm.carPath != null && pm.carPath.nodes.Count > 1)
-                {
-                    Vector3 newPos = pm.carPath.nodes[0].pos;
-                    // Compute direction from first to second node for correct orientation
-                    Vector3 dir = (pm.carPath.nodes[1].pos - newPos).normalized;
-                    Quaternion newRot = Quaternion.LookRotation(dir, Vector3.up);
-
-                    // Move the car to the new start
-                    carObj.transform.SetPositionAndRotation(newPos, newRot);
-
-                    // Reset physics
-                    Rigidbody rb = carObj.GetComponent<Rigidbody>();
-                    if (rb != null)
-                    {
-                        rb.velocity = Vector3.zero;
-                        rb.angularVelocity = Vector3.zero;
-                    }
-
-                    // Reset controls
-                    car.RequestSteering(0f);
-                    car.RequestThrottle(0f);
-                    car.RequestFootBrake(10f);
-
-                    // Reset path progress index
-                    iActiveSpan = 0;
-                }
-                else
-                {
-                    Debug.LogWarning("Path nodes not available for reset; using fallback.");
-                    car.RestorePosRot();
-                }
+                regenerateOnNextReset = false;
+                UnityMainThreadDispatcher.Instance().Enqueue(RegenerateTrackAndResetCar());
             }
             else
             {
-                // Fallback to old reset (just in case)
-                car.RestorePosRot();
+                bResetCar = true; // use the original soft reset mechanism
+            }
+        }
+
+        // NEW: Coroutine to regenerate track and reset car
+        public IEnumerator RegenerateTrackAndResetCar()
+        {
+            Debug.Log("[Regenerate] Starting track regeneration.");
+            if (pm != null)
+            {
+                pm.InitCarPath(); // regenerates path and triggers road rebuild
+                yield return null; // wait one frame for the road to be rebuilt
+
+                // Get the new start position from CarSpawner (uses updated path)
+                if (carSpawner != null)
+                {
+                    var (pos, rot) = carSpawner.GetCarStartPosRot();
+                    carObj.transform.SetPositionAndRotation(pos, rot);
+                    Debug.Log($"[Regenerate] Car placed at new start: {pos}");
+                }
+                else
+                {
+                    Debug.LogWarning("[Regenerate] CarSpawner missing; using fallback.");
+                    car.RestorePosRot();
+                }
+
+                // Reset physics
+                Rigidbody rb = carObj.GetComponent<Rigidbody>();
+                if (rb != null)
+                {
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                }
+
+                // Reset controls
                 car.RequestSteering(0f);
                 car.RequestThrottle(0f);
                 car.RequestFootBrake(10f);
-                if (pm) iActiveSpan = 0;
+                iActiveSpan = 0;
             }
+            else
+            {
+                Debug.LogError("[Regenerate] PathManager missing; cannot regenerate.");
+            }
+            Debug.Log("[Regenerate] Complete.");
             yield return null;
         }
 
@@ -624,7 +633,24 @@ namespace tk
 
             if (state == State.SendTelemetry)
             {
-                // Old reset block removed – reset is now handled via ResetAndRegen coroutine.
+                if (bResetCar)
+                {
+                    car.RestorePosRot();
+
+                    if (carObj != null)
+                    {
+                        //reset last controls
+                        car.RequestSteering(0.0f);
+                        car.RequestThrottle(0.0f);
+                        car.RequestFootBrake(10.0f);
+
+                        // Reset closest point of car path
+                        if (pm)
+                            iActiveSpan = 0;
+                    }
+
+                    bResetCar = false;
+                }
 
                 timeSinceLastCapture += Time.fixedDeltaTime;
                 if (timeSinceLastCapture >= 1.0f / limitFPS)
@@ -650,7 +676,9 @@ namespace tk
                 }
                 if (timeSinceLastMoved >= GlobalState.timeOut && carSpawner != null)
                 {
-                    Boot();
+                    // Instead of destroying the car, reset it softly
+                    timeSinceLastMoved = 0f;
+                    bResetCar = true;
                 }
             }
         }

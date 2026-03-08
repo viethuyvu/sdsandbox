@@ -2839,6 +2839,7 @@ MonoBehaviour:
   timeSinceLastMoved: 0
   lastPos: {x: 0, y: 0, z: 0}
   lastDistanceTraveled: 0
+  regenerateOnNextReset: 0
   state: 0
 --- !u!1 &1679626456172646
 GameObject:
